@@ -1,8 +1,11 @@
+use once_cell::sync::Lazy;
 use sqlx::{Connection, Executor, PgConnection, PgPool};
 use std::net::TcpListener;
 use uuid::Uuid;
-
-use zero2prod::configuration::{get_configuration, DatabaseSettings};
+use zero2prod::{
+    configuration::{get_configuration, DatabaseSettings},
+    telemetry::{get_subscriber, init_subscriber},
+};
 
 #[tokio::test]
 
@@ -21,11 +24,23 @@ async fn health_check_works() {
     assert!(response.status().is_success());
 }
 
+static TRACING: Lazy<()> = Lazy::new(|| {
+    let (subscriber_name, default_filter_level) = ("test".into(), "debug".into());
+    if std::env::var("TEST_LOG").is_ok() {
+        let subscriber = get_subscriber(subscriber_name, default_filter_level, std::io::stdout);
+        init_subscriber(subscriber);
+    } else {
+        let subscriber = get_subscriber(subscriber_name, default_filter_level, std::io::sink);
+
+        init_subscriber(subscriber);
+    };
+});
 pub struct TestApp {
     pub address: String,
     pub db_pool: PgPool,
 }
 async fn spawn_app() -> TestApp {
+    Lazy::force(&TRACING);
     let listener = TcpListener::bind("127.0.0.1:0").expect("Failed to bind a random port.");
     let port = listener.local_addr().unwrap().port();
     let mut configuration = get_configuration().expect("Failed to load configuration");
@@ -42,7 +57,7 @@ async fn spawn_app() -> TestApp {
 }
 
 pub async fn configure_database(config: &DatabaseSettings) -> PgPool {
-    let mut connection = PgConnection::connect(&config.connection_string_without_db())
+    let mut connection = PgConnection::connect_with(&config.without_db())
         .await
         .expect("Failed to connect to Postgres");
 
@@ -51,7 +66,7 @@ pub async fn configure_database(config: &DatabaseSettings) -> PgPool {
         .await
         .expect("Failed to create database");
 
-    let db_pool = PgPool::connect(&config.connection_string())
+    let db_pool = PgPool::connect_with(config.with_db())
         .await
         .expect("Failed to connect to Postgres");
 
@@ -75,7 +90,7 @@ async fn subscribe_returns_200_for_valid_form_data() {
     let body = "name=le%20guin&email=ursula_le_guin%40gmail.com";
 
     let response = client
-        .post(&format!("http://{}/subscribe", &app_address))
+        .post(&format!("http://{}/subscriptions", &app_address))
         .header("Content-Type", "application/x-www-form-urlencoded")
         .body(body)
         .send()
@@ -108,7 +123,7 @@ async fn subscribe_returns_400_for_missing_form_data() {
 
     for (invalid_body, error_message) in test_cases {
         let response = client
-            .post(&format!("http://{}/subscribe", &app_address))
+            .post(&format!("http://{}/subscriptions", &app_address))
             .header("Content-Type", "application/x-www-form-urlencoded")
             .body(invalid_body)
             .send()
